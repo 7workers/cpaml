@@ -9,8 +9,6 @@ func initTests() *Cpaml {
 
 	idx1 := Init(13)
 
-	fmt.Println("init test2...")
-
 	idx1.AddToIndex("fox1", "The quick brown fox jumps over the lazy dog then once again runs away and calls 1234567890")
 	idx1.AddToIndex("fox-frog", "The quick brown zebra jump over the lazy frog  then once again runs away and calls 8674334434")
 	idx1.AddToIndex("i-run", "I once again run away and call 8674334434")

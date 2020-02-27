@@ -1,51 +1,66 @@
 package cpaml
 
 import (
-	"fmt"
 	"regexp"
 	"strings"
 	"sync"
 )
 
 type TextInIndex struct {
-	MinCommon uint
-	Id        string
-	Text      string
-	NofKmers  uint
+	Id       string
+	NofKmers uint
 }
 
 type Cpaml struct {
-	k                  int
-	mtx                sync.RWMutex
-	indexKmers         map[string]map[uint]uint
-	allIndexedStrings  []TextInIndex
-	id2Idx             map[string]uint
-	percRepeatedDetect uint
-	percMinKmersMatch  uint
+	k                 int
+	mtx               sync.RWMutex
+	indexKmers        map[string]map[uint]uint
+	allIndexedStrings []TextInIndex
+	id2Idx            map[string]uint
+	prcRepeatedDetect uint
+	rgxStrip          *regexp.Regexp
+	tailString        string
 }
 
+type Stats struct {
+	NofSamples      int
+	NofKmersIndexed int
+}
+
+/**
+Provide kmer length. Depend on your cases, 13 works well for English and user messages and comments.
+Works not so good with short strings (100 signs and shorter)
+*/
 func Init(kmerLength int) *Cpaml {
 	c := Cpaml{k: kmerLength}
-	c.percRepeatedDetect = 70
-	c.percMinKmersMatch = 70
+	c.prcRepeatedDetect = 70
 	c.allIndexedStrings = make([]TextInIndex, 0)
-	c.allIndexedStrings = append(c.allIndexedStrings, TextInIndex{0, "", "", 0})
+	c.allIndexedStrings = append(c.allIndexedStrings, TextInIndex{"", 0})
 	c.id2Idx = make(map[string]uint)
 	c.indexKmers = make(map[string]map[uint]uint)
-
+	c.rgxStrip = regexp.MustCompile("[^\\p{L}\\p{N}]")
+	c.tailString = strings.Repeat("$", c.k/2)
 	return &c
 }
 
+/*
+return sample ID as given for AddToIndex and similarity 0-100
+*/
 func (c *Cpaml) LookupSimilar(t string) (string, uint) {
 	kmers, _ := c.kmerize(t, true)
 	matches := make(map[uint]uint, 0)
+
 	c.mtx.RLock()
-	for t, nofKmersRepeats := range kmers {
-		if nil == c.indexKmers[t] {
+
+	for kmerStr, nofKmersRepeats := range kmers {
+
+		kmerRelated, found := c.indexKmers[kmerStr]
+
+		if !found {
 			continue
 		}
 
-		for idxText, nofKmerRepeatsInText := range c.indexKmers[t] {
+		for idxText, nofKmerRepeatsInText := range kmerRelated {
 
 			_, matchExists := matches[idxText]
 
@@ -60,48 +75,55 @@ func (c *Cpaml) LookupSimilar(t string) (string, uint) {
 			}
 		}
 	}
+
 	c.mtx.RUnlock()
 
-	var bestMatchId uint
-	var bestMatchNofCommon uint
+	var bestMatchIdx uint
+	var bestMatchPrc uint
+	var bestMatchId string
 
-	for idxText, nofCommon := range matches {
-
-		if nofCommon <= bestMatchNofCommon {
-			continue
-		}
-		/*
-			if c.allIndexedStrings[idxText].MinCommon > nofCommon {
-				continue
-			}
-		*/
-		bestMatchId = idxText
-		bestMatchNofCommon = nofCommon
-	}
-
-	if bestMatchId == 0 {
+	if len(matches) == 0 {
 		return "", 0
 	}
 
-	bestMatchedText := c.allIndexedStrings[int(bestMatchId)]
+	for idxText, nofCommon := range matches {
 
-	bestMatchNofKmers := bestMatchedText.NofKmers
+		matchedText := &c.allIndexedStrings[int(idxText)]
+		matchNofKmers := matchedText.NofKmers
 
-	prcText := 100 * bestMatchNofCommon / bestMatchNofKmers
-	prcLookup := 100 * bestMatchNofCommon / uint(len(kmers))
+		prcText := 100 * nofCommon / matchNofKmers
+		prcLookup := 100 * nofCommon / uint(len(kmers))
 
-	if prcText > prcLookup {
-		return bestMatchedText.Id, prcText
-	} else {
-		return bestMatchedText.Id, prcLookup
+		maxPrc := prcLookup
+
+		if prcText > prcLookup {
+			maxPrc = prcText
+		}
+
+		if maxPrc < bestMatchPrc {
+			continue
+		}
+
+		if maxPrc == 100 {
+			return matchedText.Id, 100
+		}
+
+		bestMatchIdx = idxText
+		bestMatchPrc = maxPrc
+		bestMatchId = matchedText.Id
 	}
+
+	if bestMatchIdx == 0 {
+		return "", 0
+	}
+
+	return bestMatchId, bestMatchPrc
 }
 
 func (c *Cpaml) kmerize(t string, slide bool) (map[string]uint, uint) {
-	t = regexp.MustCompile("[,.!?:;|…“/\\\\*\\s]").ReplaceAllString(t, "")
+	t = c.rgxStrip.ReplaceAllString(t, "")
 	t = strings.ToLower(t)
-	t = regexp.MustCompile("[^\\p{L}\\p{N}]").ReplaceAllString(t, "")
-	t = t + strings.Repeat("$", c.k-1)
+	t = t + c.tailString
 	kmers := make(map[string]uint)
 	lenNormalized := uint(len([]rune(t)))
 	maxLen := int(int(lenNormalized) - c.k)
@@ -109,8 +131,9 @@ func (c *Cpaml) kmerize(t string, slide bool) (map[string]uint, uint) {
 	if slide {
 		windowSlideStep = 1
 	}
+	runes := []rune(t)
 	for i := 0; i <= maxLen; i += windowSlideStep {
-		v := string([]rune(t)[i:(i + c.k)])
+		v := string(runes[i:(i + c.k)])
 		cnt, ok := kmers[v]
 		if ok {
 			kmers[v] = cnt + 1
@@ -121,25 +144,31 @@ func (c *Cpaml) kmerize(t string, slide bool) (map[string]uint, uint) {
 	return kmers, lenNormalized
 }
 
-func (c *Cpaml) AddToSet(id string, t string) bool {
+/**
+add sample to index if not added
+retrun true if sample was added
+return second true in case string cannot be added because has high kmer/length ration, mean repeated multiple times
+*/
+func (c *Cpaml) AddToSet(id string, t string) (bool, bool) {
 	_, found := c.id2Idx[id]
 	if found {
-		return false
+		return false, false
 	}
-	isAdded, _ := c.AddToIndex(id, t)
-	return isAdded
+	isAdded, isRepetitive := c.AddToIndex(id, t)
+	return isAdded, isRepetitive
 }
 
+/**
+Add sample to index
+*/
 func (c *Cpaml) AddToIndex(id string, t string) (bool, bool) {
 
 	c.mtx.Lock()
 	idxText := uint(len(c.allIndexedStrings))
 	kmers, lenNormalized := c.kmerize(t, false)
-	minKmersRepeated := (lenNormalized / uint(c.k)) * c.percRepeatedDetect / 100
+	minKmersRepeated := (lenNormalized / uint(c.k)) * c.prcRepeatedDetect / 100
 
 	if uint(len(kmers)) < minKmersRepeated {
-		fmt.Println("repetitive string: " + t)
-		fmt.Printf("kmers: %d len:%d \n", len(kmers), len(t))
 		c.mtx.Unlock()
 		return false, true
 	}
@@ -151,17 +180,16 @@ func (c *Cpaml) AddToIndex(id string, t string) (bool, bool) {
 		c.indexKmers[kmer][idxText] = nofKmers
 	}
 
-	var minKmers = uint(len(kmers) * int(c.percMinKmersMatch) / 100)
-
-	t = ""
-
-	c.allIndexedStrings = append(c.allIndexedStrings, TextInIndex{minKmers, id, t, uint(len(kmers))})
+	c.allIndexedStrings = append(c.allIndexedStrings, TextInIndex{id, uint(len(kmers))})
 	c.id2Idx[id] = idxText
 	c.mtx.Unlock()
 
 	return true, false
 }
 
+/**
+remove from index. Recommended to use RemoveStale() instead
+*/
 func (c *Cpaml) RemoveFromIndex(idx uint, id string) {
 
 	for kmer, mapIdxes := range c.indexKmers {
@@ -194,6 +222,9 @@ func (c *Cpaml) IsInIndex(id string) bool {
 	return found
 }
 
+/**
+remove unused (inactive) samples from index. closure must return true for unused sample ID
+*/
 func (c *Cpaml) RemoveStale(isForRemove func(id string) bool) int {
 	nofRemoved := 0
 	for idInDb, idx := range c.id2Idx {
@@ -206,6 +237,6 @@ func (c *Cpaml) RemoveStale(isForRemove func(id string) bool) int {
 	return nofRemoved
 }
 
-func (c *Cpaml) GetStats() {
-
+func (c *Cpaml) GetStats() Stats {
+	return Stats{NofSamples: len(c.allIndexedStrings), NofKmersIndexed: len(c.indexKmers)}
 }
